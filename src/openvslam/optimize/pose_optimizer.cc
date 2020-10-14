@@ -23,42 +23,43 @@ pose_optimizer::pose_optimizer(const unsigned int num_trials, const unsigned int
     : num_trials_(num_trials), num_each_iter_(num_each_iter) {}
 
 unsigned int pose_optimizer::optimize(data::frame& frm) const {
-    // 1. optimizerを構築
 
+    // 1. 设置g2o优化器，这些都是固定套路，选择线性求解器、块求解器，然后选择迭代方法
     auto linear_solver = ::g2o::make_unique<::g2o::LinearSolverEigen<::g2o::BlockSolver_6_3::PoseMatrixType>>();
-    auto block_solver = ::g2o::make_unique<::g2o::BlockSolver_6_3>(std::move(linear_solver));
-    auto algorithm = new ::g2o::OptimizationAlgorithmLevenberg(std::move(block_solver));
+    auto block_solver = ::g2o::make_unique<::g2o::BlockSolver_6_3>(std::move(linear_solver));//块求解器中，顶点的维度为6，误差项的维度为3
+    auto algorithm = new ::g2o::OptimizationAlgorithmLevenberg(std::move(block_solver));//std::move将左值转换为右值，实际是转换所有权
 
+    // 选择稀疏优化器，并且设置优化方法
     ::g2o::SparseOptimizer optimizer;
     optimizer.setAlgorithm(algorithm);
 
+    // 用于记录在优化前所有的观测，相当于是初始优化时的边的数量
     unsigned int num_init_obs = 0;
 
-    // 2. frameをg2oのvertexに変換してoptimizerにセットする
-
-    auto frm_vtx = new g2o::se3::shot_vertex();
+    // 2. 设置图优化的顶点，因为这里优化的是相机的pose，所以顶点就一个
+    auto frm_vtx = new g2o::se3::shot_vertex();//使用g2o提供的顶点类型
     frm_vtx->setId(frm.id_);
-    frm_vtx->setEstimate(util::converter::to_g2o_SE3(frm.cam_pose_cw_));
-    frm_vtx->setFixed(false);
+    frm_vtx->setEstimate(util::converter::to_g2o_SE3(frm.cam_pose_cw_));//将SE3转换为g2o表示形式：四元素和平移向量
+    frm_vtx->setFixed(false);//必须设为不固定，不然优化时顶点永远不会变化
     optimizer.addVertex(frm_vtx);
 
     const unsigned int num_keypts = frm.num_keypts_;
 
-    // 3. landmarkのvertexをreprojection edgeで接続する
-
-    // reprojection edgeのcontainer
+    // 3. 设置图优化的边，这里的边是重投影误差
     using pose_opt_edge_wrapper = g2o::se3::pose_opt_edge_wrapper<data::frame>;
+
     std::vector<pose_opt_edge_wrapper> pose_opt_edge_wraps;
     pose_opt_edge_wraps.reserve(num_keypts);
 
-    // 有意水準5%のカイ2乗値
-    // 自由度n=2
+    //卡方校验(chi-square test)，在自由度为2，并且置信度为95%
     constexpr float chi_sq_2D = 5.99146;
     const float sqrt_chi_sq_2D = std::sqrt(chi_sq_2D);
-    // 自由度n=3
+
+    //卡方校验(chi-square test)，在自由度为3，并且置信度为95%
     constexpr float chi_sq_3D = 7.81473;
     const float sqrt_chi_sq_3D = std::sqrt(chi_sq_3D);
 
+    // 设置每一条边
     for (unsigned int idx = 0; idx < num_keypts; ++idx) {
         auto lm = frm.landmarks_.at(idx);
         if (!lm) {
@@ -78,22 +79,27 @@ unsigned int pose_optimizer::optimize(data::frame& frm) const {
         const auto sqrt_chi_sq = (frm.camera_->setup_type_ == camera::setup_type_t::Monocular)
                                      ? sqrt_chi_sq_2D
                                      : sqrt_chi_sq_3D;
+
+        //设置边
         auto pose_opt_edge_wrap = pose_opt_edge_wrapper(&frm, frm_vtx, lm->get_pos_in_world(),
                                                         idx, undist_keypt.pt.x, undist_keypt.pt.y, x_right,
                                                         inv_sigma_sq, sqrt_chi_sq);
         pose_opt_edge_wraps.push_back(pose_opt_edge_wrap);
-        optimizer.addEdge(pose_opt_edge_wrap.edge_);
+        optimizer.addEdge(pose_opt_edge_wrap.edge_);//增加边
     }
 
+    //边少于5个就没有必要优化了
     if (num_init_obs < 5) {
         return 0;
     }
 
     // 4. robust BAを実行する
 
-    unsigned int num_bad_obs = 0;
+    unsigned int num_bad_obs = 0;//用于记录优化过程中，通过卡方值判断位outlier的边
     for (unsigned int trial = 0; trial < num_trials_; ++trial) {
         optimizer.initializeOptimization();
+
+        //开始优化
         optimizer.optimize(num_each_iter_);
 
         num_bad_obs = 0;
@@ -105,8 +111,9 @@ unsigned int pose_optimizer::optimize(data::frame& frm) const {
                 edge->computeError();
             }
 
+            //如果有边不满足卡方校验，那么就将其设置为outlier，然后继续重新优化
             if (pose_opt_edge_wrap.is_monocular_) {
-                if (chi_sq_2D < edge->chi2()) {
+                if (chi_sq_2D < edge->chi2()) {//用卡方值进行outlier值判断
                     frm.outlier_flags_.at(pose_opt_edge_wrap.idx_) = true;
                     pose_opt_edge_wrap.set_as_outlier();
                     ++num_bad_obs;
@@ -128,11 +135,13 @@ unsigned int pose_optimizer::optimize(data::frame& frm) const {
                 }
             }
 
+            //当优化回数剩下两次时，就不要在设置鲁棒核函数了
             if (trial == num_trials_ - 2) {
                 edge->setRobustKernel(nullptr);
             }
         }
 
+        //如果优化之后剩下的边小于5，那就不用再优化了
         if (num_init_obs - num_bad_obs < 5) {
             break;
         }
@@ -140,7 +149,7 @@ unsigned int pose_optimizer::optimize(data::frame& frm) const {
 
     // 5. 情報を更新
 
-    frm.set_cam_pose(frm_vtx->estimate());
+    frm.set_cam_pose(frm_vtx->estimate());//更新frame的pose
 
     return num_init_obs - num_bad_obs;
 }

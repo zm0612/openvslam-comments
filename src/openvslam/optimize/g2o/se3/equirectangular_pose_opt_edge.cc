@@ -5,6 +5,7 @@ namespace optimize {
 namespace g2o {
 namespace se3 {
 
+//继承g2o的一元边，第一个参数是测量值的维度，第二个参数是测量值的类型，第三个参数是顶点的类型
 equirectangular_pose_opt_edge::equirectangular_pose_opt_edge()
     : ::g2o::BaseUnaryEdge<2, Vec2_t, shot_vertex>() {}
 
@@ -36,26 +37,25 @@ bool equirectangular_pose_opt_edge::write(std::ostream& os) const {
 }
 
 void equirectangular_pose_opt_edge::linearizeOplus() {
-    auto vi = static_cast<shot_vertex*>(_vertices.at(0));
-    const ::g2o::SE3Quat& cam_pose_cw = vi->shot_vertex::estimate();
-    const Vec3_t pos_c = cam_pose_cw.map(pos_w_);
+    auto vi = static_cast<shot_vertex*>(_vertices.at(0));//父类变换为子类
+    const ::g2o::SE3Quat& cam_pose_cw = vi->shot_vertex::estimate();//取出顶点对应的估计值
+    const Vec3_t pos_c = cam_pose_cw.map(pos_w_);//将世界坐标系下的地图点转换到相机坐标系下
 
     const auto pcx = pos_c(0);
     const auto pcy = pos_c(1);
     const auto pcz = pos_c(2);
-    const auto L = pos_c.norm();
+    const auto L = pos_c.norm();//求当前点距离相机光心的欧氏距离
 
-    // 回転に対する微分
+    // 旋转量的偏微分
     const Vec3_t d_pc_d_rx(0, -pcz, pcy);
     const Vec3_t d_pc_d_ry(pcz, 0, -pcx);
     const Vec3_t d_pc_d_rz(-pcy, pcx, 0);
-    // 並進に対する微分
+    // 位移的偏微分
     const Vec3_t d_pc_d_tx(1, 0, 0);
     const Vec3_t d_pc_d_ty(0, 1, 0);
     const Vec3_t d_pc_d_tz(0, 0, 1);
 
-    // 状態ベクトルを x = [rx, ry, rz, tx, ty, tz] として，
-    // 導関数ベクトル d_pcx_d_x, d_pcy_d_x, d_pcz_d_x を作成
+
     VecR_t<6> d_pcx_d_x;
     d_pcx_d_x << d_pc_d_rx(0), d_pc_d_ry(0), d_pc_d_rz(0),
         d_pc_d_tx(0), d_pc_d_ty(0), d_pc_d_tz(0);

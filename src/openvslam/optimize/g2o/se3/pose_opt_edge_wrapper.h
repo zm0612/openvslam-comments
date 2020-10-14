@@ -150,10 +150,14 @@ pose_opt_edge_wrapper<T>::pose_opt_edge_wrapper(T* shot, shot_vertex* shot_vtx, 
 
             auto c = static_cast<camera::equirectangular*>(camera_);
 
+            //构造全景相机的投影边
             auto edge = new equirectangular_pose_opt_edge();
 
+            //设置观测值
             const Vec2_t obs{obs_x, obs_y};
             edge->setMeasurement(obs);
+
+            //设置信息矩阵
             edge->setInformation(Mat22_t::Identity() * inv_sigma_sq);
 
             edge->cols_ = c->cols_;
@@ -161,7 +165,7 @@ pose_opt_edge_wrapper<T>::pose_opt_edge_wrapper(T* shot, shot_vertex* shot_vtx, 
 
             edge->pos_w_ = pos_w;
 
-            edge->setVertex(0, shot_vtx);
+            edge->setVertex(0, shot_vtx);//边对应的顶点
 
             edge_ = edge;
 
