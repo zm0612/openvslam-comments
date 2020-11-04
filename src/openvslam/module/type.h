@@ -15,10 +15,12 @@ typedef std::map<data::keyframe*, g2o::Sim3, std::less<data::keyframe*>,
 struct keyframe_set {
     keyframe_set(const std::set<data::keyframe*>& keyfrm_set, data::keyframe* lead_keyfrm, const unsigned int continuity)
         : keyfrm_set_(keyfrm_set), lead_keyfrm_(lead_keyfrm), continuity_(continuity) {}
-    std::set<data::keyframe*> keyfrm_set_;
+    std::set<data::keyframe*> keyfrm_set_;//存放lead_keyfrm_共视的关键帧
     data::keyframe* lead_keyfrm_ = nullptr;
     unsigned int continuity_ = 0;
 
+    //检查other_set集合与keyfrm_set_中是否有相同的keyframe，也就是是否有相交，如果为空则返回true，否则返回false
+    //只要有1个重合的观测，那就是非空
     bool intersection_is_empty(const std::set<data::keyframe*>& other_set) const {
         for (const auto& this_keyfrm : keyfrm_set_) {
             if (static_cast<bool>(other_set.count(this_keyfrm))) {

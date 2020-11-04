@@ -120,21 +120,23 @@ private:
     //! current keyframe
     data::keyframe* cur_keyfrm_;
     //! final loop candidate
-    data::keyframe* selected_candidate_ = nullptr;
+    data::keyframe* selected_candidate_ = nullptr;//通过层层筛选最终得到的回环帧
 
     //! previously detected keyframe sets as loop candidate
     keyframe_sets cont_detected_keyfrm_sets_;
     //! loop candidate for validation
-    std::vector<data::keyframe*> loop_candidates_to_validate_;
+    std::vector<data::keyframe*> loop_candidates_to_validate_;//即将被用来验证是不是真正的回环
 
     //! matches between the keypoint indices of the current keyframe and the landmarks observed in the candidate
-    std::vector<data::landmark*> curr_match_lms_observed_in_cand_;
+    std::vector<data::landmark*> curr_match_lms_observed_in_cand_;//它的size和关键点数量是一样的
     //! matches between the keypoint indices of the current keyframe and the landmarks observed in covisibilities of the candidate
+    //这里面主要存储了回环帧共视关键帧观测的所有地图点
     std::vector<data::landmark*> curr_match_lms_observed_in_cand_covis_;
 
     //! the Sim3 camera pose of the current keyframe AFTER loop correction (in Mat44_t format)
     Mat44_t Sim3_world_to_curr_;
     //! the Sim3 camera pose of the current keyframe AFTER loop correction (in g2o::Sim3 format)
+    //当前关键帧相对于世界坐标系的Sim3变换。根据里程计当前关键帧实际上有一个SE3变换。但是这个Sim3变换是根据回环帧获得，是当前帧的真实位姿
     g2o::Sim3 g2o_Sim3_world_to_curr_;
 
     //! the keyframe ID when the previouls loop correction was performed

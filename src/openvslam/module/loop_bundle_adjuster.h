@@ -65,7 +65,7 @@ private:
     mutable std::mutex mtx_thread_;
 
     //! number of times loop BA is performed
-    unsigned int num_exec_loop_BA_ = 0;
+    unsigned int num_exec_loop_BA_ = 0;//回环之后的BA被执行的次数
 
     //! flag to abort loop BA
     bool abort_loop_BA_ = false;

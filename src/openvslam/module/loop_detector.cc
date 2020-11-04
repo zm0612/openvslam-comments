@@ -35,6 +35,7 @@ void loop_detector::set_current_keyframe(data::keyframe* keyfrm) {
 bool loop_detector::detect_loop_candidates() {
     // if the loop detector is disabled or the loop has been corrected recently,
     // cannot perfrom the loop correction
+    //判断是否打开了回环检测功能，并且距离上一次执行回环检测已经过去了10帧
     if (!loop_detector_is_enabled_ || cur_keyfrm_->id_ < prev_loop_correct_keyfrm_id_ + 10) {
         // register to the BoW database
         bow_db_->add_keyframe(cur_keyfrm_);
@@ -45,16 +46,17 @@ bool loop_detector::detect_loop_candidates() {
 
     // 1-1. before inquiring, compute the minimum score of BoW similarity between the current and each of the covisibilities
 
-    const float min_score = compute_min_score_in_covisibilities(cur_keyfrm_);
+    const float min_score = compute_min_score_in_covisibilities(cur_keyfrm_);//通过共视关系计算最小匹配分数
 
     // 1-2. inquiring to the BoW database about the similar keyframe whose score is lower than min_score
 
-    const auto init_loop_candidates = bow_db_->acquire_loop_candidates(cur_keyfrm_, min_score);
+    const auto init_loop_candidates = bow_db_->acquire_loop_candidates(cur_keyfrm_, min_score);//通过min_score找到所有满足条件的关键帧作为候选关键帧
 
     // 1-3. if no candidates are found, cannot perform the loop correction
 
-    if (init_loop_candidates.empty()) {
+    if (init_loop_candidates.empty()) {//如果没有找到任何候选关键帧，就返回false
         // clear the buffer because any candidates are not found
+        //因为连续检测到回环候选帧的条件中断了，所以就清除cont_detected_keyfrm_sets_
         cont_detected_keyfrm_sets_.clear();
         // register to the BoW database
         bow_db_->add_keyframe(cur_keyfrm_);
@@ -66,37 +68,44 @@ bool loop_detector::detect_loop_candidates() {
     //    if the keyframe sets were detected at the previous call, is is contained in `cont_detected_keyfrm_sets_`
     //    (note that "match of two keyframe sets" means the intersection of the two sets is NOT empty)
 
+    //获得init_loop_candidates中每一个keyframe的共视关键帧
     const auto curr_cont_detected_keyfrm_sets = find_continuously_detected_keyframe_sets(cont_detected_keyfrm_sets_, init_loop_candidates);
 
     // 3. if the number of the detection is equal of greater than the threshold (`min_continuity_`),
     //    adopt it as one of the loop candidates
 
     loop_candidates_to_validate_.clear();
+    //取出那些已经被连续被观测超过3次的候选关键帧及其共视关键帧组成的集合，将其进行进一步的回环验证
     for (auto& curr : curr_cont_detected_keyfrm_sets) {
-        const auto candidate_keyfrm = curr.lead_keyfrm_;
-        const auto continuity = curr.continuity_;
+        const auto candidate_keyfrm = curr.lead_keyfrm_;//取出当前候选关键帧的一个
+        const auto continuity = curr.continuity_;//取出当前候选关键帧被连续观测到的次数
         // check if the number of the detection is equal of greater than the threshold
-        if (min_continuity_ <= continuity) {
+        if (min_continuity_ <= continuity) {//如果连续观测次数大于等于3次，则就将其视作潜在的回环帧，将来会对齐进行进一步的验证
             // adopt as the candidates
-            loop_candidates_to_validate_.push_back(candidate_keyfrm);
+            loop_candidates_to_validate_.push_back(candidate_keyfrm);//将回环候选帧集合对应的leader关键帧保存为回环待验证
         }
     }
 
     // 4. Update the members for the next call of this function
-
+    //更新这个成员变量，函数下一次调用时，还可以继续使用其中的值
     cont_detected_keyfrm_sets_ = curr_cont_detected_keyfrm_sets;
 
     // register to the BoW database
-    bow_db_->add_keyframe(cur_keyfrm_);
+    bow_db_->add_keyframe(cur_keyfrm_);//将当前keyframe添加到bow_db_中
 
     // return any candidate is found or not
     return !loop_candidates_to_validate_.empty();
 }
 
+/*! 对之前回环检测得到的候选回环帧进行回环验证：
+ *  step1: 通过Sim3求解，判断当前帧与回环候选帧是否能组成回环。主要思路：当前帧与候选帧进行特征点匹配，然后进行ransac求解sim3，进而进行优化
+ *  step2: 如果找到了回环帧，则将回环帧和回环帧对应的共视关键帧对应的所有地图点取出来
+ *  step3: 通过上一步得到的所有地图点，进行再一次重新投影匹配，获得更多的匹配关系，匹配关系大于40个则确实是一个可靠的回环，返回true
+ */
 bool loop_detector::validate_candidates() {
     // disallow the removal of the candidates
     for (const auto candidate : loop_candidates_to_validate_) {
-        candidate->set_not_to_be_erased();
+        candidate->set_not_to_be_erased();//将所有回环勾选帧的状态设置为不能删除
     }
 
     // 1. for each of the candidates, estimate and validate the Sim3 between it and the current keyframe using the observed landmarks
@@ -106,6 +115,7 @@ bool loop_detector::validate_candidates() {
                                                                    g2o_Sim3_world_to_curr_, curr_match_lms_observed_in_cand_);
     Sim3_world_to_curr_ = util::converter::to_eigen_mat(g2o_Sim3_world_to_curr_);
 
+    //如果没有找到回环帧，则需要将这些回环帧设置为可以被删除
     if (!candidate_is_found) {
         for (const auto loop_candidate : loop_candidates_to_validate_) {
             loop_candidate->set_to_be_erased();
@@ -121,23 +131,23 @@ bool loop_detector::validate_candidates() {
     // matches between the keypoints in the current and the landmarks observed in the covisibilities of the selected candidate
     curr_match_lms_observed_in_cand_covis_.clear();
 
-    auto cand_covisibilities = selected_candidate_->graph_node_->get_covisibilities();
-    cand_covisibilities.push_back(selected_candidate_);
+    auto cand_covisibilities = selected_candidate_->graph_node_->get_covisibilities();//获得回环帧的共视关键帧
+    cand_covisibilities.push_back(selected_candidate_);//回环帧自己也要进行后面的地图点获取
 
     // acquire all of the landmarks observed in the covisibilities of the candidate
     // check the already inserted landmarks
-    std::unordered_set<data::landmark*> already_inserted;
-    for (const auto covisibility : cand_covisibilities) {
-        const auto lms_in_covisibility = covisibility->get_landmarks();
-        for (const auto lm : lms_in_covisibility) {
-            if (!lm) {
+    std::unordered_set<data::landmark*> already_inserted;//主要是用来检测当前地图点是否已经插入
+    for (const auto covisibility : cand_covisibilities) {//第一个for循环是循环共视关键帧集合中的每一个共视关键帧
+        const auto lms_in_covisibility = covisibility->get_landmarks();//取出当前关键帧观测到的地图点
+        for (const auto lm : lms_in_covisibility) {//对当前关键帧的每一个地图点进行循环
+            if (!lm) {//空地图点?
                 continue;
             }
-            if (lm->will_be_erased()) {
+            if (lm->will_be_erased()) {//坏点，将来要被删除？
                 continue;
             }
 
-            if (already_inserted.count(lm)) {
+            if (already_inserted.count(lm)) {//是否当前地图点已经插入到了地图点集合中?
                 continue;
             }
             curr_match_lms_observed_in_cand_covis_.push_back(lm);
@@ -149,6 +159,7 @@ bool loop_detector::validate_candidates() {
     // then, acquire the extra 2D-3D matches
     // however, landmarks in `curr_match_lms_observed_in_cand_` are already matched with keypoints in the current keyframe,
     // thus they are excluded from the reprojection
+    //将回环帧的共视关键帧观测到的所有地图点，全部重新投影到当前关键帧中，获得更多的匹配关系
     match::projection projection_matcher(0.75, true);
     projection_matcher.match_by_Sim3_transform(cur_keyfrm_, Sim3_world_to_curr_, curr_match_lms_observed_in_cand_covis_,
                                                curr_match_lms_observed_in_cand_, 10);
@@ -165,8 +176,9 @@ bool loop_detector::validate_candidates() {
 
     // if the number of matches is greater than the threshold, adopt the selected candidate for the loop correction
     constexpr unsigned int num_final_matches_thr = 40;
-    if (num_final_matches_thr <= num_final_matches) {
+    if (num_final_matches_thr <= num_final_matches) {//如果重投影之后获得的匹配大于40个，则回环帧确实是可靠的回环帧，否则放弃当前回环帧
         // allow the removal of the candidates except for the selected one
+        //除了回环帧之外，其他候选回环帧允许执行删除操作
         for (const auto loop_candidate : loop_candidates_to_validate_) {
             if (*loop_candidate == *selected_candidate_) {
                 continue;
@@ -220,49 +232,53 @@ keyframe_sets loop_detector::find_continuously_detected_keyframe_sets(const keyf
 
     // check the already counted keyframe sets to prevent from counting the same set twice
     std::map<std::set<data::keyframe*>, bool> already_checked;
-    for (const auto& prev : prev_cont_detected_keyfrm_sets) {
+    for (const auto& prev : prev_cont_detected_keyfrm_sets) {//第一次运行该函数时prev_cont_detected_keyfrm_sets为空，当连续检测到回环的条件不满足时，它也会是空的
         already_checked[prev.keyfrm_set_] = false;
     }
 
-    for (const auto& keyfrm_to_search : keyfrms_to_search) {
+    for (const auto& keyfrm_to_search : keyfrms_to_search) {//对检测到的每一个回环候选帧进行循环
         // enlarge the candidate to the "keyframe set"
-        const auto keyfrm_set = keyfrm_to_search->graph_node_->get_connected_keyframes();
+        const auto keyfrm_set = keyfrm_to_search->graph_node_->get_connected_keyframes();//找到当前回环候选帧keyfrm_to_search的共视关键帧
 
         // check if the initialization of the buffer is needed or not
         bool initialization_is_needed = true;
 
         // check continuity for each of the previously detected keyframe set
-        for (const auto& prev : prev_cont_detected_keyfrm_sets) {
+        for (const auto& prev : prev_cont_detected_keyfrm_sets) {//对之前搜索出来的回环候选帧，以及它的共视关键帧组成vector进行循环
             // prev.keyfrm_set_: keyframe set
             // prev.lead_keyfrm_: the leader keyframe of the set
             // prev.continuity_: continuity
 
             // check if the keyframe set is already counted or not
-            if (already_checked.at(prev.keyfrm_set_)) {
+            if (already_checked.at(prev.keyfrm_set_)) {//之前被处理过的集合(vector)，将不会在一次循环中处理第二次
                 continue;
             }
 
             // compute intersection between the previous set and the current set, then check if it is empty or not
-            if (prev.intersection_is_empty(keyfrm_set)) {
+            if (prev.intersection_is_empty(keyfrm_set)) {//当前候选关键帧的共视关键帧组成的集合与先前(prev)检测出来的关键帧的共视关键帧交集是否为空
                 continue;
             }
+            //上面的if不成立，说明当前被搜索出来的候选关键帧的共视关键帧与先前的共视关键帧有重合，以此可以排除那些在前一次回环检测中被判定为候选关键帧的情况，
+            //因为，如果确实是真的回环候选帧，那么下一次应该是极有可能继续观测到的，如果没有观测到那就说明上一次的候选帧是错误的。
 
             // initialization is not needed because any candidate is found
             initialization_is_needed = false;
 
             // create the new statistics by incrementing the continuity
-            const auto curr_continuity = prev.continuity_ + 1;
-            curr_cont_detected_keyfrm_sets.emplace_back(
-                keyframe_set{keyfrm_set, keyfrm_to_search, curr_continuity});
+            const auto curr_continuity = prev.continuity_ + 1;//如果之前的回环检测候选帧又再一次被检测到，则其连续性就增加1
+
+            //既然之前的共视关键帧与现在的共视关键帧有交集，那么就说明回环帧很可能就在这附近了，那么就将它记录下来
+            curr_cont_detected_keyfrm_sets.emplace_back(keyframe_set{keyfrm_set, keyfrm_to_search, curr_continuity});//由于curr_continuity当前已经加1，所以其独特性开始慢慢显现
 
             // this keyframe set is already checked
             already_checked.at(prev.keyfrm_set_) = true;
         }
 
         // if initialization is needed, add the new statistics
+        //initialization_is_needed=true，则表示需要初始化，将keyfrms_to_search中的每一个keyframe的共视关键帧构造成keyframe_set的格式，然后存储到curr_cont_detected_keyfrm_sets。
+        //另外，当某一个新的回环候选帧与之前的回环候选帧没有交集时，则也需要将其保存下来
         if (initialization_is_needed) {
-            curr_cont_detected_keyfrm_sets.emplace_back(
-                keyframe_set{keyfrm_set, keyfrm_to_search, 0});
+            curr_cont_detected_keyfrm_sets.emplace_back(keyframe_set{keyfrm_set, keyfrm_to_search, 0});
         }
     }
 
@@ -287,10 +303,12 @@ bool loop_detector::select_loop_candidate_via_Sim3(const std::vector<data::keyfr
 
         // estimate the matches between the keypoints in the current keyframe and the landmarks observed in the candidate
         curr_match_lms_observed_in_cand.clear();
+
+        //通过bow加速搜索的方式，搜索当前keyframe和候选keyframe具有的相同关键点，并记录下对应的landmarks
         const auto num_matches = bow_matcher.match_keyframes(cur_keyfrm_, candidate, curr_match_lms_observed_in_cand);
 
         // check the threshold
-        if (num_matches < 20) {
+        if (num_matches < 20) {//共同观测小于20个，则就不是一个好的回环候选帧
             continue;
         }
 
@@ -298,10 +316,11 @@ bool loop_detector::select_loop_candidate_via_Sim3(const std::vector<data::keyfr
         // keyframe1: current keyframe, keyframe2: candidate keyframe
         // estimate Sim3 of 2->1 (candidate->current)
 
+        //通过landmarks和keypoints对应的方式，计算sim3变换
         solve::sim3_solver solver(cur_keyfrm_, candidate, curr_match_lms_observed_in_cand,
                                   fix_scale_in_Sim3_estimation_, 20);
-        solver.find_via_ransac(200);
-        if (!solver.solution_is_valid()) {
+        solver.find_via_ransac(200);//进行200次RANSAC迭代
+        if (!solver.solution_is_valid()) {//如果内点数量小于20个，则丢弃当前回环候选帧
             continue;
         }
 
@@ -315,15 +334,18 @@ bool loop_detector::select_loop_candidate_via_Sim3(const std::vector<data::keyfr
 
         // perforn non-linear optimization of the estimated Sim3
 
+        //通过上一步RANSAC求解出来的初始值，将当前关键帧和候选关键帧相互重投影，获得更多的投影匹配关系
         projection_matcher.match_keyframes_mutually(cur_keyfrm_, candidate, curr_match_lms_observed_in_cand,
                                                     scale_cand_to_curr, rot_cand_to_curr, trans_cand_to_curr, 7.5);
 
         g2o::Sim3 g2o_sim3_cand_to_curr(rot_cand_to_curr, trans_cand_to_curr, scale_cand_to_curr);
+
+        //进行g2o优化，获得更加精准的sim3解
         const auto num_optimized_inliers = transform_optimizer_.optimize(cur_keyfrm_, candidate, curr_match_lms_observed_in_cand,
                                                                          g2o_sim3_cand_to_curr, 10);
 
         // check the threshold
-        if (num_optimized_inliers < 20) {
+        if (num_optimized_inliers < 20) {//如果优化之后的内点数量小于20个，丢弃当前候选关键帧
             continue;
         }
 
@@ -332,7 +354,12 @@ bool loop_detector::select_loop_candidate_via_Sim3(const std::vector<data::keyfr
         selected_candidate = candidate;
         // convert the estimated Sim3 from "candidate -> current" to "world -> current"
         // this Sim3 indicates the correct camera pose oof the current keyframe after loop correction
+        //上面优化之后的sim3结果是：Sc_can，对应的就是将候选帧的转换到当前关键帧，而候选关键帧本身的变换关系是Scan_w，所以通过以下关系，最终获得就是当前关键帧与世界坐标系的Sim3变换矩阵
+        //这里需要注意，g2o_Sim3_world_to_curr是经过回环检测之后当前关键帧所应该有位姿，这个位姿就是根据候选关键帧的地图点求解出来的，所以g2o_Sim3_world_to_curr是当前关键帧的真实位姿
         g2o_Sim3_world_to_curr = g2o_sim3_cand_to_curr * g2o::Sim3(candidate->get_rotation(), candidate->get_translation(), 1.0);
+
+        //可以想象的是：由于存在尺度的漂移和累计误差，所以当前帧(存在漂移和累计误差)与回环帧之间就存在一定误差，这个误差就是它们之间的sim3变换矩阵g2o_sim3_cand_to_curr,
+        //而这个变换矩阵是以当前关键帧为参考的，于是就需要以世界坐标系为参考
 
         return true;
     }

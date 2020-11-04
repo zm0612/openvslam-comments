@@ -20,12 +20,21 @@ namespace optimize {
 graph_optimizer::graph_optimizer(data::map_database* map_db, const bool fix_scale)
     : map_db_(map_db), fix_scale_(fix_scale) {}
 
+/*!
+ * 回环之后对全局进行位姿图优化，不是BA优化，只是优化位姿误差，不是优化BA的重投影误差
+ * @param loop_keyfrm 回环关键帧
+ * @param curr_keyfrm 当前关键帧
+ * @param non_corrected_Sim3s 回环修正之前当前关键帧以及共视关键帧的Sim3变换
+ * @param pre_corrected_Sim3s 回环修正之后当前关键帧以及共视关键帧的Sim3变换
+ * @param loop_connections 修正之后得到的回环连接关系
+ */
 void graph_optimizer::optimize(data::keyframe* loop_keyfrm, data::keyframe* curr_keyfrm,
                                const module::keyframe_Sim3_pairs_t& non_corrected_Sim3s,
                                const module::keyframe_Sim3_pairs_t& pre_corrected_Sim3s,
                                const std::map<data::keyframe*, std::set<data::keyframe*>>& loop_connections) const {
     // 1. optimizerを構築
 
+    //构造优化器，设置优化算法
     auto linear_solver = ::g2o::make_unique<::g2o::LinearSolverCSparse<::g2o::BlockSolver_7_3::PoseMatrixType>>();
     auto block_solver = ::g2o::make_unique<::g2o::BlockSolver_7_3>(std::move(linear_solver));
     auto algorithm = new ::g2o::OptimizationAlgorithmLevenberg(std::move(block_solver));
@@ -35,34 +44,34 @@ void graph_optimizer::optimize(data::keyframe* loop_keyfrm, data::keyframe* curr
 
     // 2. vertexを追加
 
-    const auto all_keyfrms = map_db_->get_all_keyframes();
-    const auto all_lms = map_db_->get_all_landmarks();
+    const auto all_keyfrms = map_db_->get_all_keyframes();//取出所有的keyframe
+    const auto all_lms = map_db_->get_all_landmarks();//取出所有的landmark
 
-    const unsigned int max_keyfrm_id = map_db_->get_max_keyframe_id();
+    const unsigned int max_keyfrm_id = map_db_->get_max_keyframe_id();//当前最大的keyfrme id
 
     // 全keyframeの姿勢（修正前)をSim3に変換して保存しておく
-    std::vector<::g2o::Sim3, Eigen::aligned_allocator<::g2o::Sim3>> Sim3s_cw(max_keyfrm_id + 1);
+    std::vector<::g2o::Sim3, Eigen::aligned_allocator<::g2o::Sim3>> Sim3s_cw(max_keyfrm_id + 1);//用来保存修正之前的Sim3变换
     // 追加したvertexを保存しておく
-    std::vector<g2o::sim3::shot_vertex*> vertices(max_keyfrm_id + 1);
+    std::vector<g2o::sim3::shot_vertex*> vertices(max_keyfrm_id + 1);//优化的顶点，数量与keyframe数量相同
 
     constexpr int min_weight = 100;
 
     for (auto keyfrm : all_keyfrms) {
-        if (keyfrm->will_be_erased()) {
+        if (keyfrm->will_be_erased()) {//将要被删除的keyframe?
             continue;
         }
-        auto keyfrm_vtx = new g2o::sim3::shot_vertex();
+        auto keyfrm_vtx = new g2o::sim3::shot_vertex();//keyframe顶点
 
-        const auto id = keyfrm->id_;
+        const auto id = keyfrm->id_;//顶点id
 
         // 最適化前に姿勢が修正されているかをチェック
-        const auto iter = pre_corrected_Sim3s.find(keyfrm);
+        const auto iter = pre_corrected_Sim3s.find(keyfrm);//当前循环的keyframe是否是当前帧或者共视关键帧中的
         if (iter != pre_corrected_Sim3s.end()) {
             // 最適化前に姿勢を修正済みの場合はその姿勢を取り出してvertexにセットする
-            Sim3s_cw.at(id) = iter->second;
-            keyfrm_vtx->setEstimate(iter->second);
+            Sim3s_cw.at(id) = iter->second;//修正之后的Sim3变换
+            keyfrm_vtx->setEstimate(iter->second);//将当前帧(正在执行回环检测的这一帧)的位姿设置为修正之后的Sim3位姿，设置为测量值
         }
-        else {
+        else {//如果不是当前帧以及共视关键帧，也就是那些和回环没有关系的关键帧
             // 姿勢が修正されていない場合はkeyframeの姿勢をSim3に変換してセットする
             const Mat33_t rot_cw = keyfrm->get_rotation();
             const Vec3_t trans_cw = keyfrm->get_translation();
@@ -73,7 +82,7 @@ void graph_optimizer::optimize(data::keyframe* loop_keyfrm, data::keyframe* curr
         }
 
         // ループの起点になった点はfixしておく
-        if (*keyfrm == *loop_keyfrm) {
+        if (*keyfrm == *loop_keyfrm) {//将回环帧设置位固定帧，不参与优化
             keyfrm_vtx->setFixed(true);
         }
 
@@ -81,7 +90,7 @@ void graph_optimizer::optimize(data::keyframe* loop_keyfrm, data::keyframe* curr
         keyfrm_vtx->setId(id);
         keyfrm_vtx->fix_scale_ = fix_scale_;
 
-        optimizer.addVertex(keyfrm_vtx);
+        optimizer.addVertex(keyfrm_vtx);//将顶点增加到优化器中
         vertices.at(id) = keyfrm_vtx;
     }
 
@@ -91,18 +100,17 @@ void graph_optimizer::optimize(data::keyframe* loop_keyfrm, data::keyframe* curr
     std::set<std::pair<unsigned int, unsigned int>> inserted_edge_pairs;
 
     // constraint edgeを追加する関数
-    const auto insert_edge =
-        [&optimizer, &vertices, &inserted_edge_pairs](unsigned int id1, unsigned int id2, const ::g2o::Sim3& Sim3_21) {
-            auto edge = new g2o::sim3::graph_opt_edge();
-            edge->setVertex(0, vertices.at(id1));
-            edge->setVertex(1, vertices.at(id2));
-            edge->setMeasurement(Sim3_21);
+    const auto insert_edge = [&optimizer, &vertices, &inserted_edge_pairs](unsigned int id1, unsigned int id2, const ::g2o::Sim3& Sim3_21) {
+        auto edge = new g2o::sim3::graph_opt_edge();
+        edge->setVertex(0, vertices.at(id1));
+        edge->setVertex(1, vertices.at(id2));
+        edge->setMeasurement(Sim3_21);
 
-            edge->information() = MatRC_t<7, 7>::Identity();
+        edge->information() = MatRC_t<7, 7>::Identity();
 
-            optimizer.addEdge(edge);
-            inserted_edge_pairs.insert(std::make_pair(std::min(id1, id2), std::max(id1, id2)));
-        };
+        optimizer.addEdge(edge);
+        inserted_edge_pairs.insert(std::make_pair(std::min(id1, id2), std::max(id1, id2)));
+    };
 
     // threshold weight以上のloop edgeを追加する
     for (const auto& loop_connection : loop_connections) {
@@ -110,7 +118,7 @@ void graph_optimizer::optimize(data::keyframe* loop_keyfrm, data::keyframe* curr
         const auto& connected_keyfrms = loop_connection.second;
 
         const auto id1 = keyfrm->id_;
-        const ::g2o::Sim3& Sim3_1w = Sim3s_cw.at(id1);
+        const ::g2o::Sim3& Sim3_1w = Sim3s_cw.at(id1);//当前关键帧的Sim3变换
         const ::g2o::Sim3 Sim3_w1 = Sim3_1w.inverse();
 
         for (auto connected_keyfrm : connected_keyfrms) {
@@ -119,7 +127,7 @@ void graph_optimizer::optimize(data::keyframe* loop_keyfrm, data::keyframe* curr
             // current vs loop以外のedgeについては，weight thresholdを超えているもののみ
             // を追加する
             if ((id1 != curr_keyfrm->id_ || id2 != loop_keyfrm->id_)
-                && keyfrm->graph_node_->get_weight(connected_keyfrm) < min_weight) {
+                && keyfrm->graph_node_->get_weight(connected_keyfrm) < min_weight) {//对于共视关系小于100的边，不需要优化
                 continue;
             }
 
