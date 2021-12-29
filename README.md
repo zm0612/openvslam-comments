@@ -1,3 +1,11 @@
+# 温馨提示，哈哈
+
+由于发布ORB-SLAM的实验组投诉openvslam有代码侵权，所以openvslam的仓库关闭了，抛开这个话题，从学习的角度来说openvslam确实是一个不错的项目，代码写的更加的标准，而且还支持更多的相机类型，从学习的角度来说直接通过openvslam入门视觉slam，确实要比ORB-SLAM性价比更高一些。
+
+由于仓库的原作者在关闭仓库的同时也删掉了对应的文档，所以初学者可能难以顺利的将openvslam运行起来，可以参考我的博客：
+[《开源SLAM框架学习——OpenVSLAM源码解析： 第一节 安装和初探》](https://blog.csdn.net/u011341856/article/details/107020328?spm=1001.2014.3001.5501)
+
+============================我是分界线===================================
 <p align="center">
 <img src="https://raw.githubusercontent.com/xdspacelab/openvslam/master/docs/img/logo.png" width="435px">
 </p>
